@@ -1,6 +1,8 @@
 use either::Either;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicPtr;
+use std::sync::Arc;
+use std::thread;
 
 #[derive(Debug)]
 struct User {
@@ -13,22 +15,26 @@ trait UserRepository {
 }
 
 #[derive(Debug)]
-struct InMemoryUserRepository<'a, T>
+struct InMemoryUserRepository<T, R>
 where
-    T: UserRepository,
+    T: AsRef<R>,
+    R: UserRepository,
 {
     users: AtomicPtr<HashMap<String, User>>,
-    internal: &'a T,
+    internal: T,
+    phantom: std::marker::PhantomData<R>,
 }
 
-impl<'a, T> InMemoryUserRepository<'a, T>
+impl<T, R> InMemoryUserRepository<T, R>
 where
-    T: UserRepository,
+    T: AsRef<R>,
+    R: UserRepository,
 {
-    fn new(users: &mut HashMap<String, User>, internal: &'a T) -> Self {
+    fn new(users: &mut HashMap<String, User>, internal: T) -> Self {
         InMemoryUserRepository {
             users: AtomicPtr::new(users),
             internal,
+            phantom: std::marker::PhantomData,
         }
     }
 
@@ -37,9 +43,10 @@ where
     }
 }
 
-impl<T> UserRepository for InMemoryUserRepository<'_, T>
+impl<T, R> UserRepository for InMemoryUserRepository<T, R>
 where
-    T: UserRepository,
+    T: AsRef<R>,
+    R: UserRepository,
 {
     fn search(&self, id: &str) -> Option<Either<User, &mut User>> {
         let users = self.get_users()?;
@@ -50,7 +57,7 @@ where
         }
 
         let users = self.get_users()?;
-        if let Some(user) = self.internal.search(id) {
+        if let Some(user) = self.internal.as_ref().search(id) {
             users.insert(id.to_string(), user.left()?);
 
             let cache_user = users.get_mut(id);
@@ -79,11 +86,21 @@ impl UserRepository for FixedUserRepository {
 
 
 fn main() {
-    let fixed_user_repository = FixedUserRepository;
-    let user_repository = InMemoryUserRepository::new(&mut HashMap::new(), &fixed_user_repository);
+    let fixed_user_repository = Arc::new(FixedUserRepository);
+    let user_repository = Arc::new(InMemoryUserRepository::new(&mut HashMap::new(), fixed_user_repository));
 
-    let user = user_repository.search("1");
-    let user = user_repository.search("1");
+    let mut threads = vec![];
+    for _ in 0..10 {
+        let user_repository = user_repository.clone();
+        threads.push(
+            thread::spawn(move || {
+                println!("{:?}", user_repository.get_users());
+                let _ = user_repository.search("1").unwrap();
+            })
+        );
+    }
 
-    println!("{:?}", user);
+    for thread in threads {
+        thread.join().unwrap();
+    }
 }
